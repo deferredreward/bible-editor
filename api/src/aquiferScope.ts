@@ -23,7 +23,17 @@
  * meaning "whole book" (the default, unchanged behaviour). Invalid tokens are
  * skipped rather than throwing, so a partly-malformed param still scopes to the
  * chapters it could parse (and to null if it parsed none).
+ *
+ * Chapter numbers above {@link MAX_CHAPTER} and non-safe integers are skipped
+ * the same way (see issue #425): without a bound, an admin-supplied
+ * `?chapters=1-1000000000` would allocate ~1e9 `Set` entries, and a range at
+ * `2^53` (which passes `Number.isInteger` but which `n++` can never advance
+ * past) would loop forever.
  */
+// Real books top out at 150 chapters (Psalms); cap generously so the expanded
+// set can never exceed a sane size regardless of what an admin caller passes.
+const MAX_CHAPTER = 200;
+
 export function parseChapterScope(raw: string | null | undefined): Set<number> | null {
   if (!raw) return null;
   const out = new Set<number>();
@@ -34,13 +44,19 @@ export function parseChapterScope(raw: string | null | undefined): Set<number> |
     if (dash > 0) {
       const start = Number(token.slice(0, dash).trim());
       const end = Number(token.slice(dash + 1).trim());
-      if (Number.isInteger(start) && Number.isInteger(end) && start > 0 && end >= start) {
+      if (
+        Number.isSafeInteger(start) &&
+        Number.isSafeInteger(end) &&
+        start > 0 &&
+        end >= start &&
+        end <= MAX_CHAPTER
+      ) {
         for (let n = start; n <= end; n++) out.add(n);
       }
       continue;
     }
     const n = Number(token);
-    if (Number.isInteger(n) && n > 0) out.add(n);
+    if (Number.isSafeInteger(n) && n > 0 && n <= MAX_CHAPTER) out.add(n);
   }
   return out.size ? out : null;
 }

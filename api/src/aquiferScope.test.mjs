@@ -36,6 +36,25 @@ test("invalid / non-positive tokens are skipped, not fatal", () => {
   assert.equal(parseChapterScope("5-3"), null);
 });
 
+test("degenerate ranges are bounded, not expanded (issue #425)", () => {
+  // A huge range must not allocate ~1e9 Set entries; it's skipped like any
+  // other out-of-range token, so nothing parses → null (whole book).
+  assert.equal(parseChapterScope("1-1000000000"), null);
+  // 2^53 passes Number.isInteger but n++ can never advance past it — the guard
+  // is Number.isSafeInteger now, so this returns promptly without hanging.
+  assert.equal(parseChapterScope("9007199254740992-9007199254740992"), null);
+  // A single oversized chapter number is skipped too.
+  assert.equal(parseChapterScope("1000000"), null);
+  // A partly-oversized param still scopes to the in-range chapters it parsed.
+  assert.deepEqual(
+    [...parseChapterScope("9,1-1000000000,12")].sort((a, b) => a - b),
+    [9, 12],
+  );
+  // A range that ends at the cap still expands; one past it is dropped whole.
+  assert.equal(parseChapterScope("199-200").size, 2);
+  assert.equal(parseChapterScope("200-201"), null);
+});
+
 test("chapterInScope: null scope admits every chapter (whole-book default)", () => {
   assert.equal(chapterInScope(1, null), true);
   assert.equal(chapterInScope(999, null), true);

@@ -1672,7 +1672,7 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
                 )}
               </Stack>
               {sourceUltOn &&
-                (sourceUlt.status === "ready" ? (
+                (sourceUlt.status === "ready" && sourceUltText ? (
                   <Lane
                     label={sourceUltLabel}
                     text={sourceUltText}
@@ -1681,13 +1681,18 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
                     mark={mark}
                   />
                 ) : (
+                  // Not the Lane's own empty state: that copy talks about an
+                  // undrafted TARGET lane "in this workspace", which is the wrong
+                  // story for a published source that simply lacks the verse.
                   <Typography
                     variant="caption"
                     sx={{ display: "block", mb: 1, color: "text.secondary", fontStyle: "italic" }}
                   >
                     {sourceUlt.status === "error"
                       ? t("flowTranslate.sourceLaneUnavailable", { label: sourceUltLabel })
-                      : t("flowTranslate.sourceLaneLoading", { label: sourceUltLabel })}
+                      : sourceUlt.status === "ready"
+                        ? t("flowTranslate.sourceLaneNoVerse", { label: sourceUltLabel })
+                        : t("flowTranslate.sourceLaneLoading", { label: sourceUltLabel })}
                   </Typography>
                 ))}
               <Lane

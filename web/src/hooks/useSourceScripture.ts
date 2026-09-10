@@ -79,7 +79,11 @@ export function useSourceScripture(
       return;
     }
     let mounted = true;
-    setState({ status: "loading", verses: undefined });
+    // Only announce "loading" from idle/error. Once the book is cached the
+    // promise settles in a microtask, and flipping to loading first would
+    // unmount the lane for a frame on every chapter change (layout jump plus
+    // a screen-reader announcement) for nothing.
+    setState((prev) => (prev.status === "ready" ? prev : { status: "loading", verses: undefined }));
     pending
       .then((bookVerses) => {
         if (mounted) setState({ status: "ready", verses: bookVerses[chapter] ?? {} });

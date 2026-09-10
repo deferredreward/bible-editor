@@ -9,9 +9,10 @@ import { parseSourceUsfm, sourceUsfmPath } from "./sourceUsfm.ts";
 import { buildVerseIndex, coveredLaneSlices } from "./verseRange.ts";
 import { extractPlainText } from "./usfm.ts";
 
-// The real en_ult shape: \zaln-s milestones wrapping \w tokens, punctuation
-// outside the \w, a \d chapter-front, and a bridged \v 2-3. Trimmed from the
-// aligned USFM Door43 serves, not a hand-built node literal.
+// Modeled on the en_ult shape Door43 serves — \zaln-s milestones wrapping \w
+// tokens, punctuation outside the \w, a \d chapter-front — with a bridged
+// \v 2-3 added. The verse wording is abbreviated, not the published text; the
+// point is that the input is real USFM syntax, not a hand-built node literal.
 const BOOK = String.raw`\id ZEC unfoldingWord® Literal Text
 \usfm 3.0
 \ide UTF-8

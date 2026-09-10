@@ -151,3 +151,43 @@ export function useArticleRailCollapsed(): [boolean, (next: boolean) => void] {
   }, []);
   return [collapsed, setArticleRailCollapsed];
 }
+
+// ── Source ULT lane in the flows notes screen ───────────────────────────────
+//
+// Whether TranslateNotesScreen shows the published source-language literal
+// bible (the translationSource `lit` repo, e.g. unfoldingWord/en_ult) as a
+// third read-only lane above the project's own lit/sim lanes (issue #430).
+// Only meaningful in a translation-mode workspace whose lit lane is NOT already
+// that repo; the screen decides whether to offer the toggle at all. Defaults
+// OFF so nothing changes until a translator opts in.
+const SHOW_SOURCE_ULT_KEY = "be:showSourceUlt";
+
+export function getShowSourceUlt(): boolean {
+  try {
+    return localStorage.getItem(SHOW_SOURCE_ULT_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+const showSourceUltListeners = new Set<(on: boolean) => void>();
+
+export function setShowSourceUlt(next: boolean): void {
+  try {
+    localStorage.setItem(SHOW_SOURCE_ULT_KEY, String(next));
+  } catch {
+    /* quota or private mode — soft fail, still notify so the UI stays live */
+  }
+  for (const listener of showSourceUltListeners) listener(next);
+}
+
+export function useShowSourceUlt(): [boolean, (next: boolean) => void] {
+  const [on, setOnState] = useState<boolean>(getShowSourceUlt);
+  useEffect(() => {
+    showSourceUltListeners.add(setOnState);
+    return () => {
+      showSourceUltListeners.delete(setOnState);
+    };
+  }, []);
+  return [on, setShowSourceUlt];
+}

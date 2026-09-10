@@ -154,7 +154,18 @@ export async function autoClaimWorkspaceForAdmin(
         console.warn(`[autoClaim] skipping org with unusable name for ${opts.dcsUsername}: ${JSON.stringify(org)}`);
         continue;
       }
-      const result = await claimWorkspace(env, { org, label: org });
+      // Stamp export_owner = the org itself (issue #381). Without it, the
+      // claimed row carries no exportOwner, so workspaceEnv falls back to the
+      // deployment's DCS_EXPORT_OWNER (the shared service account) and — when
+      // the org has no matching preset, which is the norm for a freshly
+      // onboarded org — the nightly export renders that org's D1 into the
+      // service account's own repos under DCS_SERVICE_TOKEN. Targeting the
+      // org's own DCS instead fails CLOSED (no push rights) rather than writing
+      // to the wrong place, matching the rule that a project translating its own
+      // content exports to its own org. `org` is already an ident here (checked
+      // above), so it's a valid export owner. An operator can still override via
+      // the manual claim route's optional exportOwner.
+      const result = await claimWorkspace(env, { org, label: org, exportOwner: org });
       if (!result) {
         // Pool exhausted. Fail SOFT: the admin still signs in (against the
         // existing roster, exactly as before this feature), and an operator

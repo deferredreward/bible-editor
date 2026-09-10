@@ -704,4 +704,66 @@ console.log("[autoClaim] a warm-stale isolate reprimes for a non-admin member of
   }
 }
 
+// ── 11. An auto-claimed workspace exports to its OWN org, not the deployment's
+//        shared DCS service account (issue #381). ──────────────────────────────
+//
+// A pool slot claimed for an org with no matching preset carried no
+// export_owner, so workspaceEnv fell back to the deployment's DCS_EXPORT_OWNER
+// (the shared BibleEditorService account) and the nightly export rendered that
+// org's D1 into the service account's own repos. The fix stamps
+// export_owner = <org> on the auto-claimed row, so DCS_EXPORT_OWNER for that
+// workspace resolves to the org's own DCS (fails closed if no push rights)
+// rather than the deployment's. Without the fix, the two assertions below flip:
+// export_owner is NULL and workspaceEnv hands back "DeploymentServiceOrg".
+console.log("[autoClaim] a claimed slot exports to its own org, never the deployment's service account (#381)");
+{
+  const realFetch = globalThis.fetch;
+  try {
+    const sharedSql = sharedDbSqlite();
+    const pool1Sql = poolDbSqlite();
+    registerPoolRows(sharedSql, "pool1");
+    // The deployment's shared export owner — the value the bug leaked into a
+    // fresh org's export destination.
+    const baseEnv = makeEnv(sharedSql, { DB_POOL1: pool1Sql }, { DCS_EXPORT_OWNER: "DeploymentServiceOrg" });
+
+    // NewOrg has no preset (presetForOrg returns null), so nothing seeds
+    // project_config and the export owner is decided entirely by the workspace
+    // row / env fallback — the exact shape #381 describes.
+    globalThis.fetch = stubDcs({
+      id: 30,
+      login: "heidi",
+      orgs: [{ username: "NewOrg" }],
+      teams: [team("NewOrg", "BE-Admins")],
+    });
+
+    const { res, setCookies } = await signIn(baseEnv, "state-heidi");
+    assert(res.status === 302, `login completes (302), got ${res.status}`);
+    assert(setCookies.some((h) => /^be_ws=pool1/.test(h)), "heidi landed in the freshly claimed workspace");
+
+    const slot = sharedSql.prepare("SELECT org, export_owner FROM workspaces WHERE slug = 'pool1'").get();
+    assert(slot.org === "NewOrg", `precondition: the slot was claimed for NewOrg, got ${slot.org}`);
+    assert(
+      slot.export_owner === "NewOrg",
+      `the auto-claimed row stamps export_owner = the org, got ${JSON.stringify(slot.export_owner)}`,
+    );
+
+    // Resolve the claimed workspace on a fresh isolate and stamp its export env,
+    // exactly as the nightly ExportWorkflow does (workspaceEnv over the raw env).
+    const env2 = makeEnv(sharedSql, { DB_POOL1: pool1Sql }, { DCS_EXPORT_OWNER: "DeploymentServiceOrg" });
+    await primeWorkspaces(env2);
+    const ws = resolveWorkspace(env2, "pool1");
+    const exportEnv = workspaceEnv(env2, ws);
+    assert(
+      exportEnv.DCS_EXPORT_OWNER === "NewOrg",
+      `export env targets the org's own DCS, got ${exportEnv.DCS_EXPORT_OWNER}`,
+    );
+    assert(
+      exportEnv.DCS_EXPORT_OWNER !== "DeploymentServiceOrg",
+      "export env does NOT inherit the deployment's shared service account (the #381 bug)",
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
 console.log("workspaceAutoClaim: all assertions passed");

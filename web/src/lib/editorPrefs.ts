@@ -151,3 +151,46 @@ export function useArticleRailCollapsed(): [boolean, (next: boolean) => void] {
   }, []);
   return [collapsed, setArticleRailCollapsed];
 }
+
+// ── Show source ULT lane in flows notes ─────────────────────────────────────
+//
+// Whether the flows notes screen (#/notes) shows the project's translation
+// SOURCE literal scripture (e.g. English en_ult) as a read-only third lane
+// above the project's own lit/sim lanes. In a BSOJ translate workspace those
+// own lanes hold the Arabic AVD/NAV, but the note's quotes and note text refer
+// to the ULT wording, so a translator asked to see the ULT alongside them
+// (issue #430). Defaults OFF (nothing changes, and no source fetch fires, until
+// a translator opts in), and it is only offered where a differing source lit
+// repo exists — an English-root project never shows it. Same subscriber
+// fan-out as the toggles above so the lane and its chip stay in sync.
+const SHOW_SOURCE_ULT_KEY = "be:showSourceUlt";
+
+export function getShowSourceUlt(): boolean {
+  try {
+    return localStorage.getItem(SHOW_SOURCE_ULT_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+const showSourceUltListeners = new Set<(shown: boolean) => void>();
+
+export function setShowSourceUlt(next: boolean): void {
+  try {
+    localStorage.setItem(SHOW_SOURCE_ULT_KEY, String(next));
+  } catch {
+    /* quota or private mode — soft fail, still notify so the UI stays live */
+  }
+  for (const listener of showSourceUltListeners) listener(next);
+}
+
+export function useShowSourceUlt(): [boolean, (next: boolean) => void] {
+  const [shown, setShownState] = useState<boolean>(getShowSourceUlt);
+  useEffect(() => {
+    showSourceUltListeners.add(setShownState);
+    return () => {
+      showSourceUltListeners.delete(setShownState);
+    };
+  }, []);
+  return [shown, setShowSourceUlt];
+}

@@ -81,6 +81,7 @@ import {
   Alert,
   Box,
   Button,
+  Chip,
   CircularProgress,
   IconButton,
   MenuItem,
@@ -109,7 +110,9 @@ import { useBook } from "../../hooks/useBook";
 import { useChapter } from "../../hooks/useChapter";
 import { useProjectConfig, isTranslationProject } from "../../hooks/useProjectConfig";
 import { useSourceNotes } from "../../hooks/useSourceNotes";
+import { useSourceScripture } from "../../hooks/useSourceScripture";
 import { useUnsavedGuard } from "../../hooks/useUnsavedGuard";
+import { useShowSourceUlt } from "../../lib/editorPrefs";
 import { resolveSourceRef } from "../../lib/sourceRef";
 import {
   buildVerseIndex,
@@ -284,6 +287,35 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     [projectConfig],
   );
   const sourceNotes = useSourceNotes(translationMode ? book : null, sourceProjection);
+
+  // Optional read-only English source-ULT lane (issue #430). The note's quote
+  // and note text refer to the SOURCE literal (e.g. en_ult) wording, which in a
+  // BSOJ translate workspace is nowhere on screen — the project's own lit/sim
+  // lanes hold the Arabic AVD/NAV. Offer the lane only when a source lit repo
+  // exists that DIFFERS from the project's own lit repo: an English-root project
+  // (no translationSource → null ref) and a project whose lit source is already
+  // its own lit both correctly get no toggle (step 5).
+  const sourceLitRef = useMemo(
+    () => resolveSourceRef(projectConfig?.translationSource, "lit"),
+    [projectConfig],
+  );
+  const ownLitRepo = projectConfig?.repos?.lit;
+  const sourceUltAvailable =
+    translationMode &&
+    !!sourceLitRef &&
+    // Different repo, or same repo pulled from a different org — either way it
+    // is not the lane the project already renders.
+    (sourceLitRef.repo !== ownLitRepo || sourceLitRef.org !== projectConfig?.org);
+  const [showSourceUlt, setShowSourceUlt] = useShowSourceUlt();
+  // The visible chip label / lane label is the source lit repo code (e.g.
+  // "en_ult"), so a translator sees exactly which resource the lane is.
+  const sourceUltCode = sourceLitRef?.repo ?? litLabel;
+  // Nothing leaves the browser for this lane until the toggle is both available
+  // and on — a null book short-circuits the fetch inside the hook.
+  const sourceUltBook = useSourceScripture(
+    sourceUltAvailable && showSourceUlt ? book : null,
+    sourceLitRef,
+  );
 
   const { status, data, refetch, applyLocalRowPatch, applyLocalRowReplacement } = useChapter(
     book,
@@ -766,6 +798,26 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   const ustSegments = useMemo(
     () => flowLaneSegmentsAcross(ustLane.slices, rowQuote, rowOccurrence),
     [ustLane, rowQuote, rowOccurrence],
+  );
+
+  // Optional source-ULT reference lane (issue #430). en_ult is aligned to the
+  // same UHB/UGNT this chapter carries, so the covered slices anchor against
+  // the same `sourceIndex` and the note's original-language quote highlights in
+  // the English text through the unchanged alignment lookup. The fetched book
+  // is keyed by chapter; an off/unavailable toggle leaves `sourceUltBook` empty
+  // so this collapses to an empty lane at zero cost.
+  const sourceUltIndex = useMemo(
+    () => buildVerseIndex(sourceUltBook[chapter]),
+    [sourceUltBook, chapter],
+  );
+  const sourceUltLane = useMemo(
+    () => coveredLaneSlices(sourceUltIndex, sourceIndex, renderCovered.verses),
+    [sourceUltIndex, sourceIndex, renderCovered.verses],
+  );
+  const sourceUltText = sourceUltLane.plainText;
+  const sourceUltSegments = useMemo(
+    () => flowLaneSegmentsAcross(sourceUltLane.slices, rowQuote, rowOccurrence),
+    [sourceUltLane, rowQuote, rowOccurrence],
   );
 
   const mark = useCallback(
@@ -1613,6 +1665,35 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
                     // noteRefLabel. (issue #341)
                     `${book} ${noteRefLabel(row)}`}
               </Typography>
+              {/* Source-ULT toggle (issue #430) — only where a differing source
+                  lit repo exists; an English-root project never sees it. */}
+              {sourceUltAvailable && (
+                <Chip
+                  size="small"
+                  label={sourceUltCode}
+                  aria-pressed={showSourceUlt}
+                  aria-label={t(
+                    showSourceUlt ? "flowTranslate.sourceUltHide" : "flowTranslate.sourceUltShow",
+                    { code: sourceUltCode },
+                  )}
+                  onClick={() => setShowSourceUlt(!showSourceUlt)}
+                  color={showSourceUlt ? "primary" : "default"}
+                  variant={showSourceUlt ? "filled" : "outlined"}
+                  sx={{ mb: 0.75, fontWeight: 700, letterSpacing: "0.04em" }}
+                />
+              )}
+              {/* The source literal (e.g. en_ult), aligned to UHB/UGNT, above
+                  the project's own lit/sim lanes. dir="auto" in Lane lays this
+                  English text out LTR inside the RTL page. */}
+              {sourceUltAvailable && showSourceUlt && (
+                <Lane
+                  label={sourceUltCode}
+                  text={sourceUltText}
+                  segments={sourceUltSegments}
+                  labelFontFamily={theme.typography.fontFamily}
+                  mark={mark}
+                />
+              )}
               <Lane
                 label={litLabel}
                 text={ultText}

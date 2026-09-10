@@ -698,24 +698,103 @@ export function resolveWorkspace(env: Env, slug: string | null): Workspace {
   return list[0];
 }
 
-// Rate-limit for the unknown-slug registry recheck below: at most one re-read
-// per window per isolate, keyed on the shared-DB object (stable for the
-// isolate's lifetime, same key primeWorkspaces/registryState use). The
-// timestamp is stamped BEFORE the await so concurrent unknown-slug requests in
-// the same isolate collapse to a single registry read.
-const unknownSlugRecheck = new WeakMap<object, number>();
+// Rate-limit bookkeeping for the unknown-slug registry recheck below, keyed on
+// the shared-DB object (stable for the isolate's lifetime, the same key
+// primeWorkspaces/registryState use). Two bounds work together (issue #428, the
+// O2 refinement of #418/#419):
+//
+//   • PER-SLUG window — an individual unknown slug triggers at most one recheck
+//     per window. Keying the limit on the slug (not just the shared-DB object,
+//     as #419 did) is the whole point: a genuinely-dead cookie's recheck no
+//     longer suppresses the recheck a DIFFERENT, freshly-claimed slug needs
+//     within the same window, so that slug resolves to its own binding instead
+//     of falling through to list[0] — another tenant's D1. A repeatedly-arriving
+//     dead slug still reprimes only once per window.
+//   • GLOBAL per-window budget — at most MAX_UNKNOWN_SLUG_RECHECKS_PER_WINDOW
+//     distinct rechecks per window regardless of how many distinct unknown slugs
+//     arrive. This preserves the DoS bound the per-isolate limit gave: an
+//     attacker spraying many distinct unknown slugs still forces only bounded
+//     work per window, not one reprime per slug.
+//
+// Concurrent requests for the SAME unknown slug share ONE in-flight reprime (the
+// `inflight` promise map) and collapse to a single registry read — the async
+// generalization of #419's "stamp before the await" collapse. The budget is
+// charged when a reprime is STARTED, so shared callers count once.
 const UNKNOWN_SLUG_RECHECK_MS = 10_000;
+export const MAX_UNKNOWN_SLUG_RECHECKS_PER_WINDOW = 8;
+
+interface RecheckState {
+  windowStart: number; // start of the current global window (ms)
+  count: number; // rechecks charged against this window's budget
+  perSlug: Map<string, number>; // slug -> ms timestamp of its recheck this window
+  inflight: Map<string, Promise<void>>; // slug -> in-flight reprime shared by concurrent callers
+}
+
+const unknownSlugRecheck = new WeakMap<object, RecheckState>();
+
+function recheckState(db: object): RecheckState {
+  let s = unknownSlugRecheck.get(db);
+  if (!s) {
+    s = { windowStart: 0, count: 0, perSlug: new Map(), inflight: new Map() };
+    unknownSlugRecheck.set(db, s);
+  }
+  return s;
+}
+
+// Recheck the shared registry for an unknown slug, subject to the per-slug and
+// global-budget limits above, sharing one reprime across concurrent callers.
+// Never throws (invalidateAndReprime fails soft), so the caller can always fall
+// through to the current cache afterward.
+async function maybeRecheckUnknownSlug(env: Env, db: object, slug: string): Promise<void> {
+  const state = recheckState(db);
+  const now = Date.now();
+
+  // Roll the window if it has elapsed: fresh budget and per-slug history. (An
+  // in-flight reprime from the previous window clears itself on settle, so
+  // `inflight` needs no reset here.)
+  if (now - state.windowStart >= UNKNOWN_SLUG_RECHECK_MS) {
+    state.windowStart = now;
+    state.count = 0;
+    state.perSlug.clear();
+  }
+
+  // Collapse concurrent callers for the SAME slug onto one in-flight reprime.
+  const pending = state.inflight.get(slug);
+  if (pending) {
+    await pending;
+    return;
+  }
+
+  // Per-slug rate-limit: this exact slug already rechecked this window.
+  const lastForSlug = state.perSlug.get(slug);
+  if (lastForSlug !== undefined && now - lastForSlug < UNKNOWN_SLUG_RECHECK_MS) return;
+
+  // Global DoS bound: the window's recheck budget is spent.
+  if (state.count >= MAX_UNKNOWN_SLUG_RECHECKS_PER_WINDOW) return;
+
+  // Charge the budget and stamp the slug BEFORE awaiting, so a concurrent caller
+  // for this slug takes the in-flight branch and a repeat within the window is
+  // suppressed even while the reprime is still running.
+  state.count += 1;
+  state.perSlug.set(slug, now);
+  const p = invalidateAndReprime(env).finally(() => {
+    state.inflight.delete(slug);
+  });
+  state.inflight.set(slug, p);
+  await p;
+}
 
 // Request-path resolver that closes the warm-stale cross-tenant hole (issue
-// #418). resolveWorkspace() answers a slug this isolate's registry cache lacks
-// by returning list[0] — a DIFFERENT tenant's D1. But the registry is primed
-// once per isolate and never expires, so a workspace claimed on a sibling
-// isolate (manual pool claim, or auto-claim at another admin's login) is
-// invisible to an already-warm isolate until it recycles. When the request
-// names a slug we don't have, re-read the registry ONCE per rate-limit window
-// and re-resolve before falling back. A genuinely-dead slug still lands on
-// list[0] exactly as today (no behavior change for legitimately-retired
-// cookies); only the reachable warm-stale case is repaired.
+// #418, hardened per-slug in #428). resolveWorkspace() answers a slug this
+// isolate's registry cache lacks by returning list[0] — a DIFFERENT tenant's
+// D1. But the registry is primed once per isolate and never expires, so a
+// workspace claimed on a sibling isolate (manual pool claim, or auto-claim at
+// another admin's login) is invisible to an already-warm isolate until it
+// recycles. When the request names a slug we don't have, re-read the registry
+// (per-slug, budget-limited — see maybeRecheckUnknownSlug) and re-resolve
+// before falling back. A genuinely-dead slug still lands on list[0] exactly as
+// today (no behavior change for legitimately-retired cookies); only the
+// reachable warm-stale case is repaired.
 //
 // The top-level fetch handler (index.ts) uses this instead of resolveWorkspace.
 export async function resolveWorkspaceFresh(env: Env, slug: string | null): Promise<Workspace> {
@@ -726,20 +805,15 @@ export async function resolveWorkspaceFresh(env: Env, slug: string | null): Prom
   if (found) return found;
 
   // Unknown slug. The registry may have grown on another isolate since we
-  // primed; recheck once per window rather than immediately serving list[0].
+  // primed; recheck rather than immediately serving list[0].
   const db = sharedDb(env);
   if (db) {
-    const now = Date.now();
-    const last = unknownSlugRecheck.get(db as object) ?? 0;
-    if (now - last >= UNKNOWN_SLUG_RECHECK_MS) {
-      unknownSlugRecheck.set(db as object, now); // stamp before await (see note)
-      await invalidateAndReprime(env);
-      const fresh = listWorkspaces(env).find((w) => w.slug === slug);
-      if (fresh) return fresh;
-    }
+    await maybeRecheckUnknownSlug(env, db as object, slug);
+    const fresh = listWorkspaces(env).find((w) => w.slug === slug);
+    if (fresh) return fresh;
   }
-  // Still unknown (dead slug, or already rechecked this window): fall back to
-  // the first workspace, unchanged from resolveWorkspace().
+  // Still unknown (dead slug, or the recheck was rate-limited/budget-capped this
+  // window): fall back to the first workspace, unchanged from resolveWorkspace().
   return listWorkspaces(env)[0];
 }
 

@@ -10,6 +10,7 @@ import { reopenLaneChecks } from "./laneReopen.ts";
 import { refParts, coveredVersesFromRef } from "./importParsers.ts";
 import { contentPatchClearClauses } from "./contentPatchClauses.ts";
 import { normalizeBookCode, CHAPTER_EXISTS_SQL } from "./rowsCreateGuard.ts";
+import { isValidTwlRefRaw } from "./twlRefGuard.ts";
 import { boundHistoryToLastCreate } from "./rowHistoryBoundary.ts";
 
 export const rows = new Hono<{ Bindings: Env; Variables: { userId?: number } }>();
@@ -589,6 +590,25 @@ rows.patch("/:kind/:id", requireEditor, async (c) => {
     }
   }
 
+  // TWL ref_raw format guard (see twlRefGuard.ts — issue #724). A word link
+  // is single-verse and same-chapter only, unlike tn/tq's legitimately
+  // spanning ref_raw — so a range, an empty string, or a cross-chapter
+  // reference has no valid rendering and must not be allowed to leave the
+  // stored chapter/verse columns torn from what ref_raw says. Reject before
+  // the ref_raw -> verse re-derivation below would silently take a range's
+  // leading verse.
+  if (kind === "twl" && "ref_raw" in p) {
+    if (typeof p.ref_raw !== "string" || !isValidTwlRefRaw(p.ref_raw, current.chapter)) {
+      return c.json(
+        {
+          error: "invalid_body",
+          message: `twl ref_raw must be a single same-chapter verse reference like "${current.chapter}:N" (got ${JSON.stringify(p.ref_raw)}).`,
+        },
+        400,
+      );
+    }
+  }
+
   // A ref_raw edit (retyping the REF field) must re-derive the `verse` integer
   // column — grouping and the read/export sort key run off chapter/verse, not
   // ref_raw. Without this the row renders its new ref while staying grouped
@@ -678,6 +698,17 @@ rows.patch("/:kind/:id", requireEditor, async (c) => {
           .run();
         if (res.meta.changes) {
           const fresh = await selectRowWithLatestSource(c.env, kind, id, book);
+          // Broadcast the cleared flag to other open tabs, mirroring the
+          // reorder-only fast path below. This is a same-version bit-toggle,
+          // so the client's row-cache version guard drops the event — but the
+          // review chip is drawn from the separate book-lint fetch, which
+          // Shell nudges on any row.upserted for the open book. See #660.
+          if (fresh) {
+            const row = fresh as unknown as TnRow | TqRow | TwlRow;
+            c.executionCtx.waitUntil(
+              broadcastChapter(c.env, row.book, row.chapter, { type: "row.upserted", kind, row }),
+            );
+          }
           return c.json(fresh ?? current);
         }
         // Row moved or was deleted between the SELECT and this UPDATE — surface

@@ -323,6 +323,13 @@ export function Shell({
       ) {
         applyLocalRowReplacement(kind, row);
       }
+      // This room is scoped to the open {book, chapter}, so any row.upserted
+      // here is for this book. The server may have flipped lint-relevant state
+      // without moving row content or version — e.g. a no-op review-flag clear
+      // (see api/src/rows.ts), which the version guard above drops. The review
+      // chip is drawn from a separate fetch (useBookLint), so nudge it via the
+      // same debounced refetch the outbox listener below uses.
+      scheduleLintRefetch();
     },
     onDelete: (kind, id) => applyLocalRowDelete(kind, id),
     onVerseUpdate: (verse) => {
@@ -1250,11 +1257,16 @@ export function Shell({
     // is stored as verse 0 in the verses table. Surface the intro tile when any of
     // those exist even if no TN/TQ/TWL row is attached to verse 0.
     const tiles: VerseTile[] = [];
-    if (introHasResource || introHasScripture) tiles.push({ verse: 0, has: false, lanes: buildLanes(0) });
+    // The book-intro chapter (chapter 0) always gets the intro tile: the book
+    // summary now lists chapter 0 even when its only note is trashed or gone
+    // (see api/src/chapterSummary.ts, #756), and without a tile the rail is
+    // blank and activeVerse stays at a verse 1 that does not exist there.
+    if (chapter === 0 || introHasResource || introHasScripture)
+      tiles.push({ verse: 0, has: false, lanes: buildLanes(0) });
     const verseNums = [...versesWithSomething].filter((v) => v > 0).sort((a, b) => a - b);
     for (const v of verseNums) tiles.push({ verse: v, has: hasUnalignedFor(v), lanes: buildLanes(v) });
     return tiles;
-  }, [versesForTiles, laneIndex, versesWithTn, versesWithTq, meUserId, introHasResource, introHasTwl, t]);
+  }, [chapter, versesForTiles, laneIndex, versesWithTn, versesWithTq, meUserId, introHasResource, introHasTwl, t]);
 
   // Toggle MY checkoff stamp on a (verse, lane): optimistic + outbox (offline-safe).
   const toggleLane = useCallback(

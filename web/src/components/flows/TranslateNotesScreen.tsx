@@ -81,6 +81,7 @@ import {
   Alert,
   Box,
   Button,
+  Chip,
   CircularProgress,
   IconButton,
   MenuItem,
@@ -109,7 +110,9 @@ import { useBook } from "../../hooks/useBook";
 import { useChapter } from "../../hooks/useChapter";
 import { useProjectConfig, isTranslationProject } from "../../hooks/useProjectConfig";
 import { useSourceNotes } from "../../hooks/useSourceNotes";
+import { useSourceScripture } from "../../hooks/useSourceScripture";
 import { useUnsavedGuard } from "../../hooks/useUnsavedGuard";
+import { useShowSourceUlt } from "../../lib/editorPrefs";
 import { resolveSourceRef } from "../../lib/sourceRef";
 import {
   buildVerseIndex,
@@ -284,6 +287,30 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
     [projectConfig],
   );
   const sourceNotes = useSourceNotes(translationMode ? book : null, sourceProjection);
+
+  // The published source-language literal bible (translationSource `lit`, e.g.
+  // unfoldingWord/en_ult) as an optional third read-only lane (issue #430). A
+  // BSOJ translator's lit/sim lanes are AVD/NAV; the English the notes were
+  // written against is nowhere on this screen otherwise. Offered only when the
+  // project's own lit lane isn't already that repo (an English-root workspace
+  // would show ULT twice), and only fetched while the toggle is on.
+  const sourceLitRef = useMemo(
+    () => resolveSourceRef(projectConfig?.translationSource, "lit"),
+    [projectConfig],
+  );
+  const sourceUltAvailable =
+    translationMode &&
+    sourceLitRef != null &&
+    !(sourceLitRef.org === projectConfig?.org && sourceLitRef.repo === projectConfig?.repos?.lit);
+  // "en_ult" → "ULT": the resource code after the language prefix, the same
+  // convention orgInference derives lane labels from.
+  const sourceUltLabel = useMemo(() => {
+    const code = sourceLitRef?.repo.split("_").slice(1).join("_").toUpperCase();
+    return code || "ULT";
+  }, [sourceLitRef]);
+  const [showSourceUlt, setShowSourceUlt] = useShowSourceUlt();
+  const sourceUltOn = sourceUltAvailable && showSourceUlt;
+  const sourceUlt = useSourceScripture(sourceUltOn ? book : null, chapter, sourceLitRef, "SOURCE_LIT");
 
   const { status, data, refetch, applyLocalRowPatch, applyLocalRowReplacement } = useChapter(
     book,
@@ -743,6 +770,15 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   );
   const ultText = ultLane.plainText;
   const ustText = ustLane.plainText;
+  // The source ULT lane rides the same slice/highlight pipeline: en_ult is
+  // aligned to the same UHB/UGNT the note's quote is in, so the quote lights
+  // up in the English text exactly as it does in the project lanes.
+  const sourceUltIndex = useMemo(() => buildVerseIndex(sourceUlt.verses), [sourceUlt.verses]);
+  const sourceUltLane = useMemo(
+    () => coveredLaneSlices(sourceUltIndex, sourceIndex, renderCovered.verses),
+    [sourceUltIndex, sourceIndex, renderCovered.verses],
+  );
+  const sourceUltText = sourceUltLane.plainText;
 
   // The mockup highlights the note's phrase inside both scripture lanes. The
   // phrase is derived from the row's original-language quote through the same
@@ -766,6 +802,10 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
   const ustSegments = useMemo(
     () => flowLaneSegmentsAcross(ustLane.slices, rowQuote, rowOccurrence),
     [ustLane, rowQuote, rowOccurrence],
+  );
+  const sourceUltSegments = useMemo(
+    () => flowLaneSegmentsAcross(sourceUltLane.slices, rowQuote, rowOccurrence),
+    [sourceUltLane, rowQuote, rowOccurrence],
   );
 
   const mark = useCallback(
@@ -1601,18 +1641,60 @@ export default function TranslateNotesScreen({ book, chapter, verse, rowId }: Tr
 
             {/* scripture */}
             <Box sx={cardSx}>
-              <Typography
-                sx={{ fontSize: "0.875rem", fontWeight: 700, color: REF_COLOR, mb: 0.75 }}
-              >
-                {row.verse === 0
-                  ? t("flowTranslate.introRefLong", { book, chapter: row.chapter })
-                  : // `ref_raw` ("13:26" or bridged "13:26-27") is the authoritative
-                    // reference and the only place a note's range lives (tn_rows has
-                    // no verse_end); render it like the classic NoteCard, but only
-                    // when it names the span the lanes actually show — see
-                    // noteRefLabel. (issue #341)
-                    `${book} ${noteRefLabel(row)}`}
-              </Typography>
+              <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.75 }}>
+                <Typography
+                  sx={{ fontSize: "0.875rem", fontWeight: 700, color: REF_COLOR, flex: 1, minWidth: 0 }}
+                >
+                  {row.verse === 0
+                    ? t("flowTranslate.introRefLong", { book, chapter: row.chapter })
+                    : // `ref_raw` ("13:26" or bridged "13:26-27") is the authoritative
+                      // reference and the only place a note's range lives (tn_rows has
+                      // no verse_end); render it like the classic NoteCard, but only
+                      // when it names the span the lanes actually show — see
+                      // noteRefLabel. (issue #341)
+                      `${book} ${noteRefLabel(row)}`}
+                </Typography>
+                {sourceUltAvailable && (
+                  // Toggle for the source ULT lane (#430). A pressed chip rather
+                  // than a Switch: it sits in the card header next to the
+                  // reference, and its label IS the lane label it reveals.
+                  <Chip
+                    size="small"
+                    clickable
+                    variant={showSourceUlt ? "filled" : "outlined"}
+                    color={showSourceUlt ? "primary" : "default"}
+                    label={sourceUltLabel}
+                    aria-pressed={showSourceUlt}
+                    aria-label={t("flowTranslate.toggleSourceUlt", { label: sourceUltLabel })}
+                    onClick={() => setShowSourceUlt(!showSourceUlt)}
+                    sx={{ flex: "none", fontWeight: 700, letterSpacing: "0.04em" }}
+                  />
+                )}
+              </Stack>
+              {sourceUltOn &&
+                (sourceUlt.status === "ready" && sourceUltText ? (
+                  <Lane
+                    label={sourceUltLabel}
+                    text={sourceUltText}
+                    segments={sourceUltSegments}
+                    labelFontFamily={theme.typography.fontFamily}
+                    mark={mark}
+                  />
+                ) : (
+                  // Not the Lane's own empty state: that copy talks about an
+                  // undrafted TARGET lane "in this workspace", which is the wrong
+                  // story for a published source that simply lacks the verse.
+                  <Typography
+                    variant="caption"
+                    sx={{ display: "block", mb: 1, color: "text.secondary", fontStyle: "italic" }}
+                  >
+                    {sourceUlt.status === "error"
+                      ? t("flowTranslate.sourceLaneUnavailable", { label: sourceUltLabel })
+                      : sourceUlt.status === "ready"
+                        ? t("flowTranslate.sourceLaneNoVerse", { label: sourceUltLabel })
+                        : t("flowTranslate.sourceLaneLoading", { label: sourceUltLabel })}
+                  </Typography>
+                ))}
               <Lane
                 label={litLabel}
                 text={ultText}

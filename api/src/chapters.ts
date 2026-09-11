@@ -26,6 +26,7 @@ import {
   parseVerseContentJson,
 } from "./contentJson.ts";
 import { ensureLaneState, requireLaneState } from "./scriptureLane.ts";
+import { withChapterZero, type ChapterSummaryRow } from "./chapterSummary.ts";
 
 export const chapters = new Hono<{ Bindings: Env; Variables: { userId?: number } }>();
 
@@ -437,7 +438,7 @@ chapters.get("/:book", async (c) => {
   const rollupByChapter = new Map(
     (rollup.results ?? []).map((r) => [r.chapter, r]),
   );
-  const merged = (summary.results ?? []).map((row) => {
+  const merged: ChapterSummaryRow[] = (summary.results ?? []).map((row) => {
     const r = rollupByChapter.get(row.chapter);
     return {
       chapter: row.chapter,
@@ -450,5 +451,7 @@ chapters.get("/:book", async (c) => {
       versesDone: r?.versesDone ?? 0,
     };
   });
-  return c.json({ book, chapters: merged });
+  // Always offer chapter 0 (the front:intro) for an imported book so a trashed
+  // lone intro note stays reachable to restore (see chapterSummary.ts, #756).
+  return c.json({ book, chapters: withChapterZero(merged) });
 });

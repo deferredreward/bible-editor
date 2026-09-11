@@ -80,6 +80,48 @@ function makeD1(db, counts = { reads: 0 }) {
   };
 }
 
+// Like makeD1, but records the MAX number of registry reads in flight at once.
+// A read counts as in flight from when readRegistry issues its SELECT .all()
+// until that promise settles (deferred one microtask, so two reads issued in the
+// same synchronous burst both register before either settles). `track.max > 1`
+// means two reprimes read the shared registry concurrently — the race that lets a
+// stale or failed read settle last and clobber a good roster.
+function makeTrackingD1(db, counts, track) {
+  function bound(sql, params) {
+    return {
+      first: async () => db.prepare(sql).get(...params) ?? null,
+      all: () => {
+        if (/^\s*select/i.test(sql)) {
+          counts.reads++;
+          track.inflight++;
+          track.max = Math.max(track.max, track.inflight);
+          const results = db.prepare(sql).all(...params);
+          return Promise.resolve().then(() => {
+            track.inflight--;
+            return { results };
+          });
+        }
+        return Promise.resolve({ results: db.prepare(sql).all(...params) });
+      },
+      run: async () => {
+        const r = db.prepare(sql).run(...params);
+        return { meta: { changes: Number(r.changes) } };
+      },
+    };
+  }
+  return {
+    prepare(sql) {
+      return { bind: (...params) => bound(sql, params), ...bound(sql, []) };
+    },
+    batch: async (stmts) => {
+      const out = [];
+      for (const s of stmts) out.push(await s.run());
+      return out;
+    },
+    _tag: "shared-db",
+  };
+}
+
 // A deployed-but-unclaimed pool binding: live D1-shaped (prepare is a function)
 // so parseEntry accepts a claimed row bound to it, but never actually queried.
 const liveBinding = () => ({ prepare: () => ({}) });
@@ -212,6 +254,39 @@ console.log("[resolveFresh] concurrent callers for the same unknown slug share o
   assert(a.slug === "orgx" && b.slug === "orgx" && c.slug === "orgx", "all concurrent callers resolve orgx to its binding");
   assert(a.binding === "DB_ORGX", "…and to OrgX's own DB");
   assert(counts.reads === 2, "the concurrent same-slug callers collapsed to ONE recheck read");
+}
+
+// ── 5b. concurrent callers for DIFFERENT unknown slugs never race two registry
+//        reads — the reprime-clobber the per-slug limit (#428) otherwise opens.
+//        The per-slug relaxation lets two distinct unknown slugs each start their
+//        own invalidateAndReprime; primeWorkspaces has no in-flight dedup, so the
+//        two reads race and whichever settles LAST wins. A stale or failed read
+//        finishing last would clobber a good roster with the fallback, and — both
+//        slugs already stamped — a freshly-claimed slug would then fall through to
+//        list[0], another tenant's D1, for the window. #419 (per-isolate) never
+//        had this (one reprime/window); this asserts reprimes are serialized.
+
+console.log("[resolveFresh] concurrent callers for DIFFERENT unknown slugs never issue two racing registry reads");
+{
+  const sqlite = freshDb();
+  claim(sqlite, "home", "HomeOrg", "DB"); // list[0]
+  const counts = { reads: 0 };
+  const track = { inflight: 0, max: 0 };
+  const envB = { DB: makeTrackingD1(sqlite, counts, track), DB_ORGX: liveBinding() };
+
+  await primeWorkspaces(envB); // reads == 1, one read at a time
+  claim(sqlite, "orgx", "OrgX", "DB_ORGX");
+
+  // orgx is genuinely claimed; "dead" is not. Fire both BEFORE any await settles
+  // so they race the same registryState. On the pre-fix per-slug resolver both
+  // reprimes read concurrently (track.max === 2); serialized, track.max === 1.
+  const [a, b] = await Promise.all([
+    resolveWorkspaceFresh(envB, "orgx"),
+    resolveWorkspaceFresh(envB, "dead"),
+  ]);
+  assert(a.slug === "orgx" && a.binding === "DB_ORGX", "the freshly-claimed slug still resolves to its OWN binding");
+  assert(b.slug === "home", "the dead slug falls back to list[0]");
+  assert(track.max === 1, "distinct-slug reprimes are serialized — no two registry reads in flight at once (so a stale/failed read can't clobber a good roster)");
 }
 
 // ── 6. known slug / null slug never re-read the registry ────────────────────

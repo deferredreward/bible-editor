@@ -47,7 +47,7 @@ import type { WorkflowStep } from "cloudflare:workers";
 // --experimental-strip-types test runner, which does no extension guessing.
 // Wrangler/esbuild resolves them identically; type-only imports are stripped
 // and can stay extensionless.
-import { dcsUrls, dcsResourceFile, dcsRawUrl, fileCommitSha, fetchText, heldOutNoteResources, NT_BOOKS } from "./dcsSources.ts";
+import { dcsUrls, dcsResourceFile, dcsRawUrl, fileCommitSha, fetchText, heldOutNoteResources, releaseLockedLaneHoldOuts, NT_BOOKS } from "./dcsSources.ts";
 import { getProjectConfig, type ProjectConfig } from "./projectConfig.ts";
 import { heldOutChapters, isChapterHeldOut, NOTHING_HELD_OUT, type HeldOut } from "./bookSource.ts";
 import {
@@ -2837,6 +2837,23 @@ async function planAndStageBookResources(
     heldByResource[r] = await heldOutChapters(env, cfg, book, r, r === "tn" ? prov?.tn_source : prov?.tq_source);
   }
   const scriptureHeld: Set<Resource> = needsScriptureProv ? heldOutNoteResources(prov) : new Set();
+  // Self-heal for books whose locked (textReadOnly) lane was loaded from the
+  // English translationSource by the pre-fix translate-mode import: release
+  // the hold-out and clear the stale provenance so this pass re-pulls the lane
+  // repo's own text (pristine rows only, as always). See releaseLockedLaneHoldOuts.
+  if (scriptureHeld.has("ult") || scriptureHeld.has("ust")) {
+    const [litRow, simRow] = await Promise.all([requireLaneState(env, "lit"), requireLaneState(env, "sim")]);
+    const released = releaseLockedLaneHoldOuts(scriptureHeld, {
+      lit: activeLaneConfig(litRow).textReadOnly,
+      sim: activeLaneConfig(simRow).textReadOnly,
+    });
+    for (const r of released) scriptureHeld.delete(r);
+    if (released.length > 0) {
+      const cols = released.map((r) => `${r}_source = NULL`).join(", ");
+      await env.DB.prepare(`UPDATE book_imports SET ${cols} WHERE book = ?1`).bind(book).run();
+      console.warn("reimport: released locked-lane scripture hold-out", { book, released });
+    }
+  }
 
   const entries: StagedResource[] = [];
   for (const resource of resources) {

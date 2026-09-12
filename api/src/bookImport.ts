@@ -748,7 +748,10 @@ async function importBookFromDcs(
   const litCfg = activeLaneConfig(litState);
   const simCfg = activeLaneConfig(simState);
   const translateFromSource = !!opts.translateFromSource;
-  const scriptureOverrides = scriptureImportOverrides(cfg, translateFromSource, litCfg.source, simCfg.source);
+  const scriptureOverrides = scriptureImportOverrides(cfg, translateFromSource, litCfg.source, simCfg.source, {
+    lit: litCfg.textReadOnly,
+    sim: simCfg.textReadOnly,
+  });
   const overrides: DcsRepoOverrides = {
     lit: scriptureOverrides.lit,
     sim: scriptureOverrides.sim,
@@ -793,7 +796,7 @@ async function importBookFromDcs(
   // failure-path classifier below can re-probe BOTH the primary AND the
   // fallback and only mark the resource permanently missing when both are hard
   // 404s (a transient fallback failure must not masquerade as permanent).
-  const noteFallbackAttempt: Partial<Record<"tn" | "tq", string>> = {};
+  const noteFallbackAttempt: Partial<Record<"tn" | "tq" | "ult" | "ust", string>> = {};
   // tn and tq are independent (disjoint noteSource/noteUrls keys), so run both
   // fallback probes concurrently rather than serially — a book missing both
   // files otherwise pays for 4 sequential DCS round-trips instead of 2 pairs
@@ -831,6 +834,46 @@ async function importBookFromDcs(
     noteSource.tq = tqFallback.ref;
     noteUrls.tq = tqFallback.url;
     tqRaw = tqFallback.fetched;
+  }
+
+  // Scripture lanes: same 404-ONLY rule. The lane repo (the project's own
+  // ULT/UST text — e.g. BSOJ ar_avd/ar_nav) was fetched first above; only when
+  // it genuinely has no file for this book, and the lane is not locked, does a
+  // translate-mode import pull the English translationSource instead (a
+  // scaffold-only org) and stamp ult_source/ust_source so reimport/export hold
+  // that lane out. See scriptureImportOverrides for why this is not eager.
+  const [ultFallback, ustFallback] = await Promise.all(
+    (["ult", "ust"] as const).map(async (resource) => {
+      const role = resource === "ult" ? "lit" : "sim";
+      const raw = resource === "ult" ? ultRaw : ustRaw;
+      const ref = scriptureOverrides.fallback[role];
+      if (raw != null || !ref) return null;
+      const probe = await fetchTextWithStatus(env, urls[resource]);
+      if (!shouldFallBackOnStatus(probe.status)) return null;
+      const fallbackUrls = dcsUrls(env, cfg, book, { ...overrides, [role]: ref })!;
+      const url = fallbackUrls[resource];
+      noteFallbackAttempt[resource] = url;
+      const fetched = await fetchText(url);
+      if (fetched == null) return null;
+      console.warn("import: lane scripture file absent; falling back to translation source", {
+        book,
+        resource,
+        url,
+      });
+      return { ref, url, fetched };
+    }),
+  );
+  if (ultFallback) {
+    scriptureOverrides.lit = ultFallback.ref;
+    scriptureOverrides.fromSource.lit = true;
+    urls.ult = ultFallback.url;
+    ultRaw = ultFallback.fetched;
+  }
+  if (ustFallback) {
+    scriptureOverrides.sim = ustFallback.ref;
+    scriptureOverrides.fromSource.sim = true;
+    urls.ust = ustFallback.url;
+    ustRaw = ustFallback.fetched;
   }
 
   const missing: Array<{ label: string; url: string }> = [];
@@ -873,7 +916,9 @@ async function importBookFromDcs(
         // fallback URL are hard 404s. If either probe is transient, retrying may
         // still recover the resource, so classify the whole thing as transient.
         const fallbackUrl =
-          label === "tn" || label === "tq" ? noteFallbackAttempt[label] : undefined;
+          label === "tn" || label === "tq" || label === "ult" || label === "ust"
+            ? noteFallbackAttempt[label]
+            : undefined;
         if (fallbackUrl) {
           const fallback = classifyStatus(await fetchTextWithStatus(env, fallbackUrl));
           const permanent = primary.permanent && fallback.permanent;

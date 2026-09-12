@@ -210,13 +210,19 @@ export function translationSourceRepoRef(
   return { owner: ref.org, repo: ref.repo, ref: "master" };
 }
 
-// Pure helper for importBookFromDcs's lit/sim/twl override decision. On a
-// plain (load-my-own-work) import, ULT/UST come from the active lane source
-// and TWL stays on the org repo (both passed in as fall-through defaults). On
-// a translate-mode import, each of lit/sim/twl instead prefers the project's
-// configured English translationSource — same reasoning as tn/tq (a fresh
-// scaffold-only org 404s on files it hasn't populated yet) — falling back to
-// the lane/org default whenever that role is blank in translationSource.
+// Pure helper for importBookFromDcs's lit/sim/twl override decision.
+//
+// ULT/UST ALWAYS import from the active lane source first — the lane repo is
+// the project's own scripture text (BSOJ ar_avd/ar_nav, a GL's own glt/gst),
+// whatever the import intent. On a translate-mode import the project's
+// configured English translationSource is offered only as a 404-ONLY
+// fallback (`fallback.lit/sim`), for the scaffold-only org whose lane repo has
+// no file for the book yet — the same rule tn/tq follow in bookImport.ts.
+// Swapping eagerly (the pre-2026-09 behaviour) loaded English ULT/UST text into
+// lanes labelled AR_AVD/AR_NAV for BSOJ LUK. A textReadOnly lane (locked,
+// published Bible) never falls back at all: a missing book there is an error,
+// not a reason to show English. TWL is not lane text and keeps preferring the
+// translationSource eagerly.
 export interface ScriptureImportOverrides {
   lit: RepoRef;
   sim: RepoRef;
@@ -224,7 +230,17 @@ export interface ScriptureImportOverrides {
   // Which roles actually resolved to the translationSource (vs. falling
   // through to the lane/org default) — the watermark-seeding step needs this
   // to know which resources are held out of the nightly self-heal reimport.
+  // lit/sim start false; bookImport flips them only after a 404 fallback.
   fromSource: { lit: boolean; sim: boolean; twl: boolean };
+  // translationSource refs bookImport may fall back to for lit/sim when the
+  // lane repo hard-404s the book. null = no fallback (load mode, locked lane,
+  // or the role is blank in translationSource).
+  fallback: { lit: RepoRef | null; sim: RepoRef | null };
+}
+
+export interface LockedLanes {
+  lit: boolean;
+  sim: boolean;
 }
 
 export function scriptureImportOverrides(
@@ -232,15 +248,17 @@ export function scriptureImportOverrides(
   translateFromSource: boolean,
   laneLit: RepoRef,
   laneSim: RepoRef,
+  lockedLanes: LockedLanes,
 ): ScriptureImportOverrides {
-  const srcLit = translateFromSource ? translationSourceRepoRef(cfg, "lit") : null;
-  const srcSim = translateFromSource ? translationSourceRepoRef(cfg, "sim") : null;
+  const fallbackLit = translateFromSource && !lockedLanes.lit ? translationSourceRepoRef(cfg, "lit") : null;
+  const fallbackSim = translateFromSource && !lockedLanes.sim ? translationSourceRepoRef(cfg, "sim") : null;
   const srcTwl = translateFromSource ? translationSourceRepoRef(cfg, "twl") : null;
   return {
-    lit: srcLit ?? laneLit,
-    sim: srcSim ?? laneSim,
+    lit: laneLit,
+    sim: laneSim,
     ...(srcTwl ? { twl: srcTwl } : {}),
-    fromSource: { lit: !!srcLit, sim: !!srcSim, twl: !!srcTwl },
+    fromSource: { lit: false, sim: false, twl: !!srcTwl },
+    fallback: { lit: fallbackLit, sim: fallbackSim },
   };
 }
 
@@ -283,6 +301,22 @@ export function heldOutNoteResources(
   if (prov.ult_source) out.add("ult");
   if (prov.ust_source) out.add("ust");
   if (prov.twl_source) out.add("twl");
+  return out;
+}
+
+// A locked (textReadOnly) lane never legitimately sources its text from the
+// translationSource, so a non-null book_imports.ult_source / ust_source on such
+// a lane can only be the residue of the pre-fix translate-mode import that
+// loaded English into AVD/NAV. Returns the scripture resources whose hold-out
+// must be RELEASED so the reimport re-pulls them from the lane repo (the caller
+// also clears the stale column). twl is untouched: it is not lane text.
+export function releaseLockedLaneHoldOuts(
+  held: ReadonlySet<ReimportResource>,
+  lockedLanes: LockedLanes,
+): ("ult" | "ust")[] {
+  const out: ("ult" | "ust")[] = [];
+  if (lockedLanes.lit && held.has("ult")) out.push("ult");
+  if (lockedLanes.sim && held.has("ust")) out.push("ust");
   return out;
 }
 

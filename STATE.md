@@ -51,6 +51,16 @@
   (memory: tn-ai-duplication-roundtrip)
 - **Dangling `-be-` export refs** — `DCS_SERVICE_TOKEN` can't delete branches; drifted branches must be
   cleared by hand with a maintainer PAT. (memory: export-service-token-no-delete, export-branch-no-rebase-drift)
+- **English ULT/UST under Arabic lanes after a translate-intent import** (BSOJ `LUK`, reported 2026-09-12
+  from `#/notes/LUK/1`). Verified on the dev workspace (`bible_editor_dev`, workspace `bsoj`): LUK was
+  imported 2026-09-10 with `translateFromSource`, `book_imports.ult_source/ust_source` read
+  `source:unfoldingWord/en_ult|en_ust`, both lanes unlocked (`textReadOnly:false`), and BSOJ/ar_avd +
+  ar_nav DO carry `43-LUK.usfm` on master — so the eager swap, not a missing file, loaded the English.
+  Dev was repaired 2026-09-12 (columns cleared, `POST /api/books/LUK/reimport` ult+ust re-pulled all
+  pristine rows from the lane repos). **Still open for a human:** the same check on any other BSOJ
+  deployment this fork does not touch, and any book imported with the translate intent after 2026-07-31
+  (`c741f89`). Repair recipe: clear the two columns for the book, then Re-pull ULT+UST; rows a human
+  already edited on the English text come back as `skipped_edited` and need a forced overwrite.
 
 ## Lessons learned (write durable, cross-session facts here — not in chat)
 

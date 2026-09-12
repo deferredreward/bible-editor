@@ -14,6 +14,7 @@ import {
   translationSourceRepoRef,
   scriptureImportOverrides,
   heldOutNoteResources,
+  releaseLockedLaneHoldOuts,
   shouldFallBackOnStatus,
   resolveSourceRef,
   normalizeSourceRef,
@@ -348,10 +349,12 @@ function runPure() {
   // ── scriptureImportOverrides — importBookFromDcs's lit/sim/twl decision ──
   const laneLit = { owner: "BSOJ", repo: "ar_avd", ref: "master" };
   const laneSim = { owner: "BSOJ", repo: "ar_nav", ref: "master" };
+  const unlocked = { lit: false, sim: false };
+  const locked = { lit: true, sim: true };
 
   // Load mode (translateFromSource=false) → always the lane/org refs, twl
-  // absent from the result (dcsUrls then falls through to the org repo).
-  const loadMode = scriptureImportOverrides(CFG, false, laneLit, laneSim);
+  // absent from the result, no fallback offered.
+  const loadMode = scriptureImportOverrides(CFG, false, laneLit, laneSim, unlocked);
   assert(
     loadMode.lit === laneLit && loadMode.sim === laneSim,
     "scriptureImportOverrides: load mode → lane refs, unchanged",
@@ -361,27 +364,60 @@ function runPure() {
     !loadMode.fromSource.lit && !loadMode.fromSource.sim && !loadMode.fromSource.twl,
     "scriptureImportOverrides: load mode → fromSource all false",
   );
-
-  // Translate mode with a full translationSource → lit/sim/twl all resolve to
-  // the English source, and fromSource flags it for the watermark skip.
-  const translateMode = scriptureImportOverrides(CFG, true, laneLit, laneSim);
   assert(
-    translateMode.lit.repo === "en_ult" && translateMode.sim.repo === "en_ust",
-    "scriptureImportOverrides: translate mode → lit/sim from translationSource",
+    loadMode.fallback.lit === null && loadMode.fallback.sim === null,
+    "scriptureImportOverrides: load mode → no scripture fallback",
+  );
+
+  // Translate mode, unlocked lanes: ULT/UST STILL come from the lane repo —
+  // the project's own scripture text wins whenever it has the book. The English
+  // translationSource is only OFFERED as the 404 fallback; fromSource stays
+  // false until bookImport actually takes it. twl keeps the eager swap.
+  // Regression: BSOJ LUK (2026-09) imported en_ult/en_ust into lanes labelled
+  // AR_AVD/AR_NAV because this used to swap eagerly.
+  const translateMode = scriptureImportOverrides(CFG, true, laneLit, laneSim, unlocked);
+  assert(
+    translateMode.lit === laneLit && translateMode.sim === laneSim,
+    "scriptureImportOverrides: translate mode → lit/sim stay on the lane repo (never eager English)",
+  );
+  assert(
+    !translateMode.fromSource.lit && !translateMode.fromSource.sim,
+    "scriptureImportOverrides: translate mode → lit/sim fromSource false until a 404 fallback",
+  );
+  assert(
+    translateMode.fallback.lit?.repo === "en_ult" && translateMode.fallback.sim?.repo === "en_ust",
+    "scriptureImportOverrides: translate mode, unlocked → English offered as 404 fallback",
   );
   assert(translateMode.twl?.repo === "en_twl", "scriptureImportOverrides: translate mode → twl from translationSource");
+  assert(translateMode.fromSource.twl, "scriptureImportOverrides: translate mode → fromSource.twl true");
+
+  // Translate mode, LOCKED lanes (textReadOnly, e.g. BSOJ AVD/NAV): no
+  // fallback at all — a missing book on a published Bible is an error, not a
+  // reason to show English.
+  const lockedTranslate = scriptureImportOverrides(CFG, true, laneLit, laneSim, locked);
   assert(
-    translateMode.fromSource.lit && translateMode.fromSource.sim && translateMode.fromSource.twl,
-    "scriptureImportOverrides: translate mode → fromSource all true",
+    lockedTranslate.lit === laneLit && lockedTranslate.sim === laneSim,
+    "scriptureImportOverrides: locked lanes → lane refs",
+  );
+  assert(
+    lockedTranslate.fallback.lit === null && lockedTranslate.fallback.sim === null,
+    "scriptureImportOverrides: locked lanes → no English fallback",
+  );
+  assert(lockedTranslate.twl?.repo === "en_twl", "scriptureImportOverrides: locked lanes → twl still from translationSource");
+
+  // Per-lane lock: only the locked lane loses its fallback.
+  const halfLocked = scriptureImportOverrides(CFG, true, laneLit, laneSim, { lit: true, sim: false });
+  assert(
+    halfLocked.fallback.lit === null && halfLocked.fallback.sim?.repo === "en_ust",
+    "scriptureImportOverrides: per-lane lock → only the locked lane loses its fallback",
   );
 
-  // Translate mode with translationSource missing a role → falls back to the
-  // lane/org ref for that role, and fromSource reports it as NOT sourced (so
-  // the watermark is still seeded for it).
-  const partialTranslateOverrides = scriptureImportOverrides(partialScriptureCfg, true, laneLit, laneSim);
+  // Translate mode with translationSource missing a role → no fallback for
+  // that role, twl absent (falls through to org).
+  const partialTranslateOverrides = scriptureImportOverrides(partialScriptureCfg, true, laneLit, laneSim, unlocked);
   assert(
-    partialTranslateOverrides.lit === laneLit,
-    "scriptureImportOverrides: translate mode, blank lit role → falls back to lane ref",
+    partialTranslateOverrides.lit === laneLit && partialTranslateOverrides.fallback.lit === null,
+    "scriptureImportOverrides: translate mode, blank lit role → lane ref, no fallback",
   );
   assert(
     partialTranslateOverrides.twl === undefined,
@@ -390,6 +426,25 @@ function runPure() {
   assert(
     !partialTranslateOverrides.fromSource.lit && !partialTranslateOverrides.fromSource.twl,
     "scriptureImportOverrides: blank roles report fromSource=false",
+  );
+
+  // ── releaseLockedLaneHoldOuts — reimport self-heal for poisoned locked lanes ──
+  const heldAll = new Set(["ult", "ust", "twl", "tn"]);
+  assert(
+    releaseLockedLaneHoldOuts(heldAll, unlocked).length === 0,
+    "releaseLockedLaneHoldOuts: unlocked lanes → nothing released (provenance may be legitimate)",
+  );
+  assert(
+    releaseLockedLaneHoldOuts(heldAll, locked).join(",") === "ult,ust",
+    "releaseLockedLaneHoldOuts: locked lanes → ult+ust released, twl/tn untouched",
+  );
+  assert(
+    releaseLockedLaneHoldOuts(heldAll, { lit: true, sim: false }).join(",") === "ult",
+    "releaseLockedLaneHoldOuts: per-lane",
+  );
+  assert(
+    releaseLockedLaneHoldOuts(new Set(["twl"]), locked).length === 0,
+    "releaseLockedLaneHoldOuts: nothing held for ult/ust → nothing released",
   );
 
   // ── resolveSourceRef + normalizeSourceRef (the shared per-resource accessor) ──
